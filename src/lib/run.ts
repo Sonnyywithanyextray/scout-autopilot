@@ -7,6 +7,7 @@ import { fetchSupabaseListings, supabaseConfigured } from './data/supabase'
 import { gbrainRecallCount, gbrainToken } from './memory/gbrain'
 import { newId, updateState, type RunSnapshot } from './memory/local-store'
 import { preferenceStore, providerStatuses, ruleStore } from './memory/providers'
+import { computeCounterfactual } from './counterfactual'
 import { applyPreferenceMemories, dedupeKey, describeRule, rankListing } from './ranker'
 import type { Listing, Ranked, RunResult, ScoreDelta, TraceStep, WeightKey } from './types'
 import { WEIGHT_KEYS } from './types'
@@ -45,6 +46,8 @@ export async function runScout(requested: 'seed' | 'supabase' = 'seed'): Promise
   const rejectedByRules = rejected.filter((r) => r.ruleHits.some((h) => h.delta < 0 || h.effect === 'reject')).length
   const rulesUsed = new Set(ranked.flatMap((r) => r.ruleHits.map((h) => h.ruleId)))
   const matches = matchesAll.slice(0, TOP_N)
+  matchesAll.forEach((r, i) => { r.rank = i + 1 })
+
 
   const trace: TraceStep[] = [
     { label: `Loaded ${listings.length} listings`, detail: source === 'seed' ? 'demo inventory' : 'Scout Supabase (read-only)' },
@@ -80,6 +83,18 @@ export async function runScout(requested: 'seed' | 'supabase' = 'seed'): Promise
   })
   await ruleStore.recordApplied(ranked.flatMap((r) => r.ruleHits.map((h) => h.ruleId)))
 
+  // Next-best listings the renter might ask about: ones that just fell out of
+  // the matches first, then remaining matches, then soft rejections.
+  const justDropped = new Set(
+    previous ? ranked.filter((r) => r.status !== 'match' && previous.byListing[r.listing.id]?.status === 'match').map((r) => r.listing.id) : [],
+  )
+  const softCandidates = ranked.filter((r) => !matches.includes(r) && (r.status === 'match' || (r.status === 'rejected' && r.score > 0)))
+  const nearMisses = [
+    ...softCandidates.filter((r) => justDropped.has(r.listing.id)),
+    ...softCandidates.filter((r) => !justDropped.has(r.listing.id)),
+  ].slice(0, 6)
+  for (const r of [...matches, ...nearMisses]) r.counterfactual = computeCounterfactual(prefs, rules, r, ranked)
+
   return {
     runId,
     at,
@@ -96,6 +111,7 @@ export async function runScout(requested: 'seed' | 'supabase' = 'seed'): Promise
       rulesApplied: rulesUsed.size,
     },
     matches,
+    nearMisses,
     flagged: flagged.slice(0, 5),
     movers: previous ? computeMovers(previous, ranked) : [],
     providers: [
@@ -117,38 +133,47 @@ const COMPONENT_LABEL: Record<WeightKey, string> = {
 // Explain each score change as component shifts (from preference/weight
 // changes) plus rule hits that appeared or disappeared since the last run.
 function computeMovers(prev: RunSnapshot, ranked: Ranked[]): ScoreDelta[] {
+  // Rank among matches (1-based); null when not a match
+  const prevOrder = Object.entries(prev.byListing)
+    .filter(([, v]) => v.status === 'match')
+    .sort(([, a], [, b]) => b.score - a.score)
+    .map(([id]) => id)
+  const nowOrder = ranked.filter((r) => r.status === 'match').map((r) => r.listing.id)
+  const rankOf = (order: string[], id: string) => { const i = order.indexOf(id); return i === -1 ? null : i + 1 }
+
   // The demo story is about the shortlist: what left it and what took its place.
-  const prevTop = new Set(
-    Object.entries(prev.byListing)
-      .filter(([, v]) => v.status === 'match')
-      .sort(([, a], [, b]) => b.score - a.score)
-      .slice(0, TOP_N)
-      .map(([id]) => id),
-  )
-  const nowTop = new Set(ranked.filter((r) => r.status === 'match').slice(0, TOP_N).map((r) => r.listing.id))
+  const prevTop = new Set(prevOrder.slice(0, TOP_N))
+  const nowTop = new Set(nowOrder.slice(0, TOP_N))
   const out: ScoreDelta[] = []
   for (const r of ranked) {
     const before = prev.byListing[r.listing.id]
     if (!before) continue
-    const moved = before.score !== r.score || before.status !== r.status
+    const rankBefore = rankOf(prevOrder, r.listing.id)
+    const rankAfter = rankOf(nowOrder, r.listing.id)
+    const moved = before.score !== r.score || before.status !== r.status || rankBefore !== rankAfter
     if (!moved) continue
     if (before.status !== 'match' && r.status !== 'match') continue // only care about movement in/out of the shortlist
 
     const causes: ScoreDelta['causes'] = []
     const prevRules = new Map(before.ruleHits.map((h) => [h.ruleId, h]))
     const nowRules = new Map(r.ruleHits.map((h) => [h.ruleId, h]))
-    for (const [id, h] of nowRules) if (!prevRules.has(id)) causes.push({ label: `Learned rule: ${h.label}`, delta: h.delta })
-    for (const [id, h] of prevRules) if (!nowRules.has(id)) causes.push({ label: `Rule removed: ${h.label}`, delta: -h.delta })
+    const learnedLabel = (h: Ranked['ruleHits'][number]) => (h.effect === 'tradeoff' ? h.label : `Learned rule: ${h.label}`)
+    for (const [id, h] of nowRules) if (!prevRules.has(id)) causes.push({ label: learnedLabel(h), delta: h.delta })
+    for (const [id, h] of prevRules) if (!nowRules.has(id)) causes.push({ label: `Removed: ${h.label}`, delta: -h.delta })
     for (const k of WEIGHT_KEYS) {
       const d = Math.round(r.components[k] - before.components[k])
       if (Math.abs(d) >= 2) causes.push({ label: `${COMPONENT_LABEL[k]} weighted ${d > 0 ? 'higher' : 'lower'}`, delta: d })
     }
     causes.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
-    out.push({ listingId: r.listing.id, title: r.listing.title, before: before.score, after: r.score, statusBefore: before.status, statusAfter: r.status, causes })
+    out.push({
+      listingId: r.listing.id, title: r.listing.title, before: before.score, after: r.score,
+      statusBefore: before.status, statusAfter: r.status, rankBefore, rankAfter, causes,
+    })
   }
   const relevance = (d: ScoreDelta) => (prevTop.has(d.listingId) ? 1 : 0) + (nowTop.has(d.listingId) ? 1 : 0)
+  const rankShift = (d: ScoreDelta) => Math.abs((d.rankBefore ?? 99) - (d.rankAfter ?? 99))
   return out
     .filter((d) => relevance(d) > 0)
-    .sort((a, b) => relevance(b) - relevance(a) || Math.abs(b.after - b.before) - Math.abs(a.after - a.before))
+    .sort((a, b) => relevance(b) - relevance(a) || Math.abs(b.after - b.before) - Math.abs(a.after - a.before) || rankShift(b) - rankShift(a))
     .slice(0, 5)
 }

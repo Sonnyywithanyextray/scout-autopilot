@@ -2,6 +2,8 @@
 // corrections produce a visible ranking flip:
 //   - "Transit matters more than size"      → transit-heavy studios rise
 //   - "Over 10 min walk to BART is too far" → the big Bernal 1BR falls out
+//   - "I'll pay $150 more to save 20+ min of commute" → the Rincon Hill 1BR
+//     ($125 over budget, 12-min commute) jumps past cheaper, farther places
 // Filler is generated from a fixed-seed PRNG so every run is identical.
 
 import { DEFAULT_WEIGHTS } from '../ranker'
@@ -22,11 +24,12 @@ export const DEMO_PROFILE: Preferences = {
   weights: { ...DEFAULT_WEIGHTS },
 }
 
-type SeedInput = Omit<Listing, 'transit' | 'city' | 'url'> & { walk?: number }
+type SeedInput = Omit<Listing, 'transit' | 'city' | 'url'> & { walk?: number; commute?: number }
 
 function make(s: SeedInput): Listing {
-  const { walk, ...rest } = s
-  return { ...rest, city: 'San Francisco', url: null, transit: estimateTransit(s.neighborhood, walk) }
+  const { walk, commute, ...rest } = s
+  const transit = estimateTransit(s.neighborhood, walk)
+  return { ...rest, city: 'San Francisco', url: null, transit: transit && commute !== undefined ? { ...transit, commuteMinutes: commute } : transit }
 }
 
 const HEROES: SeedInput[] = [
@@ -35,6 +38,9 @@ const HEROES: SeedInput[] = [
   { id: 'hero-hayes', title: 'Hayes Valley jr 1BR, walk to Civic Center', source: 'craigslist', price: 2550, neighborhood: 'Hayes Valley', bedrooms: 1, sqft: 560, ownBathroom: true, petsAllowed: false, moveInDate: '2026-10-28', legitimacyScore: 0.88, postedDaysAgo: 3, walk: 6 },
   { id: 'hero-noe', title: 'Noe Valley garden 1BR, quiet street', source: 'facebook', price: 2495, neighborhood: 'Noe Valley', bedrooms: 1, sqft: 780, ownBathroom: true, petsAllowed: true, moveInDate: '2026-11-01', legitimacyScore: 0.9, postedDaysAgo: 4, walk: 15 },
   { id: 'hero-soma', title: 'SoMa loft studio near Powell BART', source: 'roomies', price: 2590, neighborhood: 'SoMa', bedrooms: 0, sqft: 520, ownBathroom: true, petsAllowed: true, moveInDate: '2026-11-10', legitimacyScore: 0.86, postedDaysAgo: 1, walk: 5 },
+  // Tradeoff hero: $125 over budget but a 12-min commute. "I'll pay $150 more
+  // if it saves me 20+ min of commute" should lift it past cheaper, longer-commute places.
+  { id: 'hero-rincon', title: 'Rincon Hill 1BR, walk to the office', source: 'roomies', price: 2725, neighborhood: 'SoMa', bedrooms: 1, sqft: 610, ownBathroom: true, petsAllowed: true, moveInDate: '2026-11-01', legitimacyScore: 0.9, postedDaysAgo: 1, walk: 4, commute: 12 },
   { id: 'hero-potrero', title: 'Huge Potrero Hill 1BR with private deck', source: 'craigslist', price: 2300, neighborhood: 'Potrero Hill', bedrooms: 1, sqft: 950, ownBathroom: true, petsAllowed: true, moveInDate: '2026-11-01', legitimacyScore: 0.85, postedDaysAgo: 2, walk: 20 },
 ]
 

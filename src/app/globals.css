@@ -150,3 +150,32 @@ input, textarea { font: inherit; }
 .tile.up .tile-note { color: var(--up); }
 .tile-causes { display: flex; flex-wrap: wrap; gap: 6px; }
 .tile .cause { background: rgba(255,255,255,.7); }
+
+.tile-rank { font-weight: 500; opacity: .85; }
+.tile-score .badge { white-space: nowrap; }
+.tradeoff-line { color: var(--brain); font-weight: 600; }
+.kind-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--brain); background: var(--brain-soft); border-radius: 5px; padding: 1px 6px; margin-right: 6px; vertical-align: 1px; }
+
+.cf { margin-top: 12px; border: 1px solid #d5cff5; background: var(--brain-soft); border-radius: 10px; padding: 10px 12px; }
+.cf-h { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--brain); margin-bottom: 4px; }
+.cf-s { font-weight: 600; }
+.cf-r { margin-top: 4px; font-size: 13px; color: var(--down); }
+.cf-note { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+.near { padding: 4px 8px; }
+.nm { border-bottom: 1px solid var(--line); }
+.nm:last-child { border-bottom: 0; }
+.nm-row { width: 100%; display: grid; grid-template-columns: 48px minmax(0, 1fr) auto auto 16px; gap: 10px; align-items: center; text-align: left; background: none; border: 0; padding: 10px 6px; color: inherit; }
+.nm-row:hover { background: #faf9f6; }
+.nm-score { font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+.nm-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nm-meta { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.nm-status { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 6px; background: var(--accent-soft); color: var(--up); white-space: nowrap; }
+.nm-status.out { background: var(--down-soft); color: var(--down); }
+.nm-caret { color: var(--muted); }
+.nm-body { padding: 0 6px 12px 64px; }
+.nm-hits { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 640px) {
+  .nm-row { grid-template-columns: 44px minmax(0, 1fr) auto 14px; }
+  .nm-meta { display: none; }
+  .nm-body { padding-left: 6px; }
+}

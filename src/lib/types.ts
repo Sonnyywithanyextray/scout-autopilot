@@ -93,8 +93,22 @@ export type RuleEffect = (typeof RULE_EFFECTS)[number]
 
 export type RuleValue = number | string | boolean | string[]
 
+// Exchange-rate tradeoff: "I'll pay up to $maxDollars more, at $dollarsPerUnit
+// per unit of improvement in gainField below/above baseline."
+export const TRADEOFF_GAIN_FIELDS = ['commuteMinutes', 'walkToTransitMinutes', 'sqft'] as const
+export type TradeoffGainField = (typeof TRADEOFF_GAIN_FIELDS)[number]
+
+export interface Tradeoff {
+  gainField: TradeoffGainField
+  baseline: number // improvement is measured from here (e.g. 45-min commute)
+  dollarsPerUnit: number // e.g. $7.50 per minute saved
+  maxDollars: number // cap on extra rent the renter will accept
+}
+
 export interface LearnedRule {
   id: string
+  kind?: 'threshold' | 'tradeoff' // absent = threshold (field/operator/value)
+  tradeoff?: Tradeoff
   field: RuleField
   operator: RuleOperator
   value: RuleValue
@@ -113,7 +127,7 @@ export type ComponentPoints = Record<WeightKey, number>
 
 export interface RuleHit {
   ruleId: string
-  effect: RuleEffect
+  effect: RuleEffect | 'tradeoff'
   delta: number // points added (negative for penalties)
   label: string
 }
@@ -122,6 +136,17 @@ export interface Check {
   label: string
   ok: boolean
   estimated?: boolean
+}
+
+export interface Counterfactual {
+  lever: 'price' | 'walk' | 'commute'
+  change: string // e.g. "rent were $125 lower ($2,600)"
+  fromRank: number | null // null = not currently a match
+  toRank: number
+  fromScore: number
+  toScore: number
+  responsible: string | null // learned rule costing it points, if any
+  sentence: string
 }
 
 export interface Ranked {
@@ -134,6 +159,8 @@ export interface Ranked {
   reasons: string[]
   concerns: string[]
   checks: Check[]
+  rank?: number | null // position among matches (set by the run)
+  counterfactual?: Counterfactual | null
 }
 
 export interface ScoreDelta {
@@ -143,6 +170,8 @@ export interface ScoreDelta {
   after: number
   statusBefore: Ranked['status']
   statusAfter: Ranked['status']
+  rankBefore: number | null // position among matches, 1-based
+  rankAfter: number | null
   causes: { label: string; delta: number }[]
 }
 
@@ -167,6 +196,7 @@ export interface RunResult {
     rulesApplied: number
   }
   matches: Ranked[]
+  nearMisses: Ranked[] // next-best listings, with what would lift them
   flagged: Ranked[]
   movers: ScoreDelta[]
   providers: ProviderStatus[]

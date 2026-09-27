@@ -13,6 +13,7 @@ import type {
   PreferenceMemory,
   Ranked,
   RuleField,
+  Tradeoff,
   RuleHit,
   RuleValue,
   WeightKey,
@@ -72,13 +73,15 @@ function applyPatch(prefs: Preferences, p: PreferencePatch) {
 
 // ── Components (each 0..1, then weighted) ───────────────────────────────────
 
+export function budgetRatio(prefs: Preferences, price: number | null): number {
+  if (price === null) return 0.5
+  return price <= prefs.budgetMax ? 0.7 + 0.3 * Math.min(1, (prefs.budgetMax - price) / 500) : 0.3
+}
+
 function componentRatios(prefs: Preferences, l: Listing): Record<WeightKey, number> {
   const inList = (xs: string[]) => !!l.neighborhood && xs.some((n) => n.toLowerCase() === l.neighborhood!.toLowerCase())
 
-  let budget = 0.5
-  if (l.price !== null) {
-    budget = l.price <= prefs.budgetMax ? 0.7 + 0.3 * Math.min(1, (prefs.budgetMax - l.price) / 500) : 0.3
-  }
+  const budget = budgetRatio(prefs, l.price)
 
   const neighborhood = inList(prefs.avoidNeighborhoods) ? 0 : inList(prefs.neighborhoods) ? 1 : 0.4
 
@@ -118,6 +121,7 @@ export function fieldValue(l: Listing, field: RuleField): RuleValue | null {
 }
 
 export function ruleMatches(rule: LearnedRule, l: Listing): boolean {
+  if (rule.kind === 'tradeoff') return false // applied separately, see tradeoffCredit
   const actual = fieldValue(l, rule.field)
   if (actual === null || actual === undefined) return false
   const v = rule.value
@@ -148,11 +152,38 @@ const FIELD_LABEL: Record<RuleField, string> = {
   source: 'source',
 }
 
-export function describeRule(r: Pick<LearnedRule, 'field' | 'operator' | 'value' | 'effect' | 'magnitude'>): string {
+export function describeRule(r: Pick<LearnedRule, 'field' | 'operator' | 'value' | 'effect' | 'magnitude' | 'kind' | 'tradeoff'>): string {
+  if (r.kind === 'tradeoff' && r.tradeoff) return describeTradeoff(r.tradeoff)
   const val = Array.isArray(r.value) ? r.value.join(', ') : String(r.value)
   const cond = `${FIELD_LABEL[r.field]} ${r.operator.replace('_', ' ')} ${val}`
   const eff = r.effect === 'penalty' ? `−${r.magnitude}` : r.effect === 'boost' ? `+${r.magnitude}` : r.effect
   return `${cond} → ${eff}`
+}
+
+// ── Tradeoffs (exchange rate: improvement in one field buys extra rent) ─────
+
+const GAIN_UNIT: Record<Tradeoff['gainField'], { unit: string; better: 'lower' | 'higher'; noun: string }> = {
+  commuteMinutes: { unit: 'min', better: 'lower', noun: 'commute' },
+  walkToTransitMinutes: { unit: 'min', better: 'lower', noun: 'walk to transit' },
+  sqft: { unit: 'sq ft', better: 'higher', noun: 'space' },
+}
+
+export function describeTradeoff(t: Tradeoff): string {
+  const g = GAIN_UNIT[t.gainField]
+  const dir = g.better === 'lower' ? `below ${t.baseline} ${g.unit}` : `above ${t.baseline} ${g.unit}`
+  return `each ${g.unit} of ${g.noun} ${dir} is worth $${t.dollarsPerUnit.toFixed(2).replace(/\.00$/, '')}, up to $${t.maxDollars} more rent`
+}
+
+// How many dollars of extra rent this listing's advantage is worth, and why.
+export function tradeoffCredit(t: Tradeoff, l: Listing): { credit: number; gain: number; label: string } | null {
+  const g = GAIN_UNIT[t.gainField]
+  const value = t.gainField === 'sqft' ? l.sqft : t.gainField === 'commuteMinutes' ? l.transit?.commuteMinutes : l.transit?.walkMinutes
+  if (value == null) return null
+  const gain = g.better === 'lower' ? t.baseline - value : value - t.baseline
+  if (gain <= 0) return null
+  const credit = Math.round(Math.min(t.maxDollars, gain * t.dollarsPerUnit))
+  const adj = g.better === 'lower' ? 'shorter' : 'more'
+  return { credit, gain, label: `Tradeoff: ${gain} ${g.unit} ${adj} ${g.noun} worth $${credit}` }
 }
 
 // ── Rank one listing ────────────────────────────────────────────────────────
@@ -165,9 +196,17 @@ export function rankListing(prefs: Preferences, rules: LearnedRule[], l: Listing
     components: zero, ruleHits: [], reasons: [], concerns: [reason], checks,
   })
 
-  // Hard eliminators from the profile
+  // Learned tradeoffs: dollars of extra rent this listing's advantages are worth
+  const tradeoffs = rules
+    .filter((r) => r.kind === 'tradeoff' && r.tradeoff)
+    .map((r) => ({ rule: r, hit: tradeoffCredit(r.tradeoff!, l) }))
+    .filter((x): x is { rule: LearnedRule; hit: NonNullable<ReturnType<typeof tradeoffCredit>> } => !!x.hit && x.hit.credit > 0)
+  const credit = tradeoffs.reduce((s, x) => s + x.hit.credit, 0)
+  const effectivePrice = l.price === null ? null : l.price - credit
+
+  // Hard eliminators from the profile (budget uses the tradeoff-adjusted price)
   if (l.city.toLowerCase() !== prefs.city.toLowerCase()) return reject('Wrong city')
-  if (l.price !== null && l.price > prefs.budgetMax + prefs.budgetFlex) return reject(`Over budget ($${l.price})`)
+  if (effectivePrice !== null && effectivePrice > prefs.budgetMax + prefs.budgetFlex) return reject(`Over budget ($${l.price})`)
   if (l.petsAllowed === false && prefs.petsHave) return reject('No pets allowed')
   if (l.ownBathroom === false && prefs.ownBathRequired) return reject('Shared bathroom')
 
@@ -178,8 +217,21 @@ export function rankListing(prefs: Preferences, rules: LearnedRule[], l: Listing
 
   let score = WEIGHT_KEYS.reduce((s, k) => s + components[k], 0)
 
-  // Learned rules
+  // Tradeoff bonus = budget points at the adjusted price minus budget points at
+  // the real price. Kept out of `components` so it is attributed explicitly.
   const ruleHits: RuleHit[] = []
+  if (credit > 0 && l.price !== null) {
+    const bonus = ((budgetRatio(prefs, effectivePrice) - budgetRatio(prefs, l.price)) * prefs.weights.budget * 100) / totalWeight
+    // Split across tradeoffs in proportion to the credit each contributed
+    for (const { rule, hit } of tradeoffs) {
+      const delta = Math.round((bonus * hit.credit) / credit)
+      if (delta === 0) continue
+      score += delta
+      ruleHits.push({ ruleId: rule.id, effect: 'tradeoff', delta, label: hit.label })
+    }
+  }
+
+  // Learned rules
   let flagged = false
   for (const r of rules) {
     if (!ruleMatches(r, l)) continue
@@ -204,7 +256,9 @@ export function rankListing(prefs: Preferences, rules: LearnedRule[], l: Listing
     flagged = true
     concerns.push('Looks questionable — verify before reaching out')
   }
-  if (l.price !== null && l.price > prefs.budgetMax) concerns.push(`$${l.price - prefs.budgetMax} over budget (within flex)`)
+  if (l.price !== null && l.price > prefs.budgetMax) {
+    concerns.push(`$${l.price - prefs.budgetMax} over budget${credit > 0 ? ` — offset by $${credit} tradeoff` : ' (within flex)'}`)
+  }
   if (l.transit && l.transit.walkMinutes > 10) concerns.push(`${l.transit.walkMinutes} min walk to ${l.transit.station} (est.)`)
   for (const h of ruleHits) if (h.delta < 0) concerns.push(h.label)
 

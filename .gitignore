@@ -11,3 +11,4 @@ __pycache__/
 next-env.d.ts
 *.tsbuildinfo
 .next-dev.log
+.shots/

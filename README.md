@@ -83,13 +83,19 @@ Claude never ranks listings directly; it only edits the weights and rules the ra
 
 ## Scripted demo (seed inventory)
 
-| Step | Action | Result |
-|---|---|---|
-| 1 | Run Scout | #1 is the Bernal 1BR, 86% (big and cheap, but 18 min walk to BART) |
-| 2 | "Not for me" on it → *"Too far from BART. Anything over 10 minutes walking from rapid transit should rank much lower."* | Learns rule `walk to transit > 10 → −25` + transit weight ↑ / space weight ↓ |
-| 3 | (auto re-run) | Bernal 86 → 52, drops out · Mission studio 75 → 86, becomes #1 · trace shows the applied rule |
-| 4 | What Scout has learned → Remove the rule → Run | Bernal climbs back; the user stays in control |
+Start from **Reset demo** (What Scout has learned tab), then:
 
+| # | Action | What judges see |
+|---|---|---|
+| 1 | **Run Scout** | Agent trace; #1 is the Bernal 1BR at 86% (big, cheap, 18 min walk to BART) |
+| 2 | Type in Teach: *"I'll pay $150 more if it saves me at least 20 minutes of commute."* | Live steps: Claude → GBrain → Memorable → re-rank. Learns tradeoff `$7.50/min, up to $150` |
+| 3 | (auto re-run) | Banner: **Rincon Hill 69 → 79, newly surfaced at #3**; Potrero **#3 → #7**, overtaken. Card shows "Tradeoff: 33 min shorter commute worth $150 (+10)" |
+| 4 | "Not for me" on Bernal → *"Too far from BART. Anything over 10 minutes walking should rank much lower."* | Bernal **86 → ~52**, drops out; a BART-close studio becomes #1 |
+| 5 | Click Bernal under **Just missed** | "If the walk were 10 min instead of 18, it would become a match at #1 (52 → 89). Your learned rule costs it 25 pts" — computed by re-scoring |
+| 6 | Open GBrain ↗ / Memorable ↗ from the learning steps | "Scout housing search" page in GBrain; captured procedure in Memorable |
+| 7 | What Scout has learned → Remove a rule → Run | Rankings revert; user stays in control |
+
+`node scripts/demo-shots.mjs "<utterance>" [card|box] [prefix]` replays a flow in headless Chrome and saves screenshots to `.shots/`.
 `npx tsx scripts/simulate.ts` prints the before/after rankings without the UI.
 
 ## Layout

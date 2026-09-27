@@ -6,8 +6,8 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod'
 import { z } from 'zod'
-import type { LearnedRule, Listing, Preferences, PreferencePatch, RuleValue } from '../types'
-import { RULE_EFFECTS, RULE_FIELDS, RULE_OPERATORS, WEIGHT_KEYS } from '../types'
+import type { LearnedRule, Listing, Preferences, PreferencePatch, RuleValue, Tradeoff } from '../types'
+import { RULE_EFFECTS, RULE_FIELDS, RULE_OPERATORS, TRADEOFF_GAIN_FIELDS, WEIGHT_KEYS } from '../types'
 import { describeRule } from '../ranker'
 
 const MODEL = 'claude-opus-5'
@@ -40,6 +40,15 @@ const CorrectionSchema = z.object({
       reason: z.string().describe('Short human-readable reason, e.g. "Over 10 min walk to rapid transit".'),
     }),
   ),
+  tradeoffs: z.array(
+    z.object({
+      gainField: z.enum(TRADEOFF_GAIN_FIELDS),
+      baseline: z.number().nullable().describe('Where improvement is measured from. null = use the renter\'s default (commute: their max commute; walk: 15 min; sqft: 500).'),
+      dollarsPerUnit: z.number().describe('Extra monthly rent the renter accepts per unit of improvement (per minute saved, or per extra sq ft).'),
+      maxDollars: z.number().describe('Cap on extra monthly rent for this tradeoff.'),
+      reason: z.string().describe('Short human-readable summary, e.g. "Pay up to $150 more for a 20+ min shorter commute".'),
+    }),
+  ),
 })
 
 export type Interpretation = {
@@ -49,12 +58,25 @@ export type Interpretation = {
   engine: 'claude' | 'fallback'
 }
 
+// Tradeoffs are stored as rules of kind "tradeoff"; field/operator/value are unused.
+function tradeoffRule(t: Tradeoff, reason: string): Interpretation['rules'][number] {
+  return { kind: 'tradeoff', tradeoff: t, field: 'price', operator: '>', value: 0, effect: 'boost', magnitude: 0, reason: reason.slice(0, 120) }
+}
+
+function defaultBaseline(field: Tradeoff['gainField'], prefs: Preferences): number {
+  if (field === 'commuteMinutes') return prefs.maxCommuteMinutes ?? 45
+  if (field === 'walkToTransitMinutes') return 15
+  return 500
+}
+
 const SYSTEM = `You are Scout, an apartment-search agent for a renter in San Francisco.
 The user is correcting how you rank listings. Convert their feedback into structured changes that a deterministic ranker will apply on every future search.
 
-Two kinds of output:
+Three kinds of output:
 1. preferences — durable facts about the renter (budget, commute cap, neighborhoods, and relative importance of ranking components). Ranking components and their weights: budget, neighborhood, transit (walk to BART/Muni), space (sq ft), moveIn, legitimacy. When the user signals a priority shift ("X matters more than Y", or rejects a listing for a reason tied to a component), raise that component's weight and lower the competing one so the change is visible.
 2. rules — concrete, reusable procedures learned from the correction, as field/operator/value → effect. Prefer a penalty over reject unless the user states a dealbreaker. Use magnitude 20-30 for "rank much lower", 10-15 for mild dislikes.
+
+3. tradeoffs — when the user states an exchange ("I'll pay $X more if it saves me Y minutes of commute", "worth an extra $X for Y more sq ft"), express it as an exchange rate: dollarsPerUnit = X / Y, maxDollars = X. Leave baseline null unless the user names a reference point. Use tradeoffs (not rules) for these.
 
 Rule fields: price ($/mo), walkToTransitMinutes, commuteMinutes (to FiDi), sqft, bedrooms, neighborhood (string, or string[] with in/not_in), ownBathroom, petsAllowed, legitimacyScore (0-1), postedDaysAgo, source.
 Only encode what the user actually said or clearly implied. Do not repeat a rule or preference that already exists. Return empty arrays if nothing should change.`
@@ -65,12 +87,12 @@ export async function interpretCorrection(input: {
   prefs: Preferences
   existingRules: LearnedRule[]
 }): Promise<Interpretation> {
-  if (!process.env.ANTHROPIC_API_KEY) return heuristic(input.utterance, input.listing)
+  if (!process.env.ANTHROPIC_API_KEY) return heuristic(input.utterance, input.listing, input.prefs)
   try {
     return await withClaude(input)
   } catch (err) {
     console.error('[interpret] Claude failed, using fallback parser', err)
-    return heuristic(input.utterance, input.listing)
+    return heuristic(input.utterance, input.listing, input.prefs)
   }
 }
 
@@ -125,7 +147,21 @@ async function withClaude(input: Parameters<typeof interpretCorrection>[0]): Pro
           : null,
       }),
     })),
-    rules: out.rules.map((r) => ({
+    rules: [
+      ...out.tradeoffs
+        .filter((t) => t.dollarsPerUnit > 0 && t.maxDollars > 0)
+        .map((t) =>
+          tradeoffRule(
+            {
+              gainField: t.gainField,
+              baseline: t.baseline ?? defaultBaseline(t.gainField, input.prefs),
+              dollarsPerUnit: Math.round(clamp(t.dollarsPerUnit, 0.01, 200) * 100) / 100,
+              maxDollars: Math.round(clamp(t.maxDollars, 10, 1000)),
+            },
+            t.reason,
+          ),
+        ),
+      ...out.rules.map((r) => ({
       field: r.field,
       operator: r.operator,
       value: coerceValue(r.value, r.operator),
@@ -133,6 +169,7 @@ async function withClaude(input: Parameters<typeof interpretCorrection>[0]): Pro
       magnitude: r.effect === 'penalty' || r.effect === 'boost' ? clamp(Math.round(r.magnitude), 5, 40) : 0,
       reason: r.reason.slice(0, 120),
     })),
+    ],
   }
 }
 
@@ -152,9 +189,22 @@ const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n
 
 // ── Keyword fallback: keeps the demo alive with no API key / network ───────
 
-function heuristic(utterance: string, listing: Listing | null): Interpretation {
+function heuristic(utterance: string, listing: Listing | null, prefs: Preferences): Interpretation {
   const u = utterance.toLowerCase()
   const out: Interpretation = { engine: 'fallback', reply: '', preferences: [], rules: [] }
+
+  // "$150 more ... 20 min ... commute" → exchange-rate tradeoff
+  const pay = u.match(/\$\s?(\d[\d,]*)\s*(?:more|extra)/)
+  const mins = u.match(/(\d+)\s*(?:-|\s)?\s*min/)
+  if (pay && mins && /commute|walk|bart|transit/.test(u)) {
+    const dollars = Number(pay[1].replace(/,/g, ''))
+    const n = Number(mins[1])
+    const gainField: Tradeoff['gainField'] = /commute/.test(u) ? 'commuteMinutes' : 'walkToTransitMinutes'
+    const reason = `Pay up to $${dollars} more for a ${n}+ min shorter ${gainField === 'commuteMinutes' ? 'commute' : 'walk to transit'}`
+    out.rules.push(tradeoffRule({ gainField, baseline: defaultBaseline(gainField, prefs), dollarsPerUnit: Math.round((dollars / n) * 100) / 100, maxDollars: dollars }, reason))
+    out.reply = `Got it — I'll treat each minute saved as worth about $${(dollars / n).toFixed(2)}, up to $${dollars} more rent.`
+    return out
+  }
   const minutes = u.match(/(\d+)\s*(?:-|\s)?\s*min/)
   const transitWords = /(bart|transit|muni|train|station|subway)/.test(u)
 

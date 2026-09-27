@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { LearnedRule, PreferenceMemory, Preferences, ProviderStatus, Ranked, RunResult, WeightKey } from '@/lib/types'
 import { WEIGHT_KEYS } from '@/lib/types'
 
@@ -243,6 +243,14 @@ function RunView(props: {
                   ))}
                   {run.matches.length === 0 && <div className="empty">No listings cleared your bar this run.</div>}
                 </div>
+                {run.nearMisses.length > 0 && (
+                  <>
+                    <p className="h" style={{ marginTop: 20 }}>Just missed — click to see what would change Scout&apos;s mind</p>
+                    <div className="panel near">
+                      {run.nearMisses.map((r) => <NearMissRow key={r.listing.id} r={r} />)}
+                    </div>
+                  </>
+                )}
                 {run.flagged.length > 0 && (
                   <>
                     <p className="h" style={{ marginTop: 20 }}>Flagged as questionable</p>
@@ -312,7 +320,7 @@ function LearningPanel({ learning, links }: { learning: Learning; links: Memory[
                 <span key={p.id} className="chip"><span className="tag">GBrain · preference</span>{p.statement}</span>
               ))}
               {result.rules.map((r) => (
-                <span key={r.id} className="chip"><span className="tag">Memorable · rule</span>{r.reason}</span>
+                <span key={r.id} className="chip"><span className="tag">Memorable · {r.kind === 'tradeoff' ? 'tradeoff' : 'rule'}</span>{r.reason}</span>
               ))}
             </div>
           )}
@@ -323,17 +331,59 @@ function LearningPanel({ learning, links }: { learning: Learning; links: Memory[
   )
 }
 
+// ── Counterfactuals ─────────────────────────────────────────────────────────
+
+function CounterfactualBox({ cf }: { cf: NonNullable<Ranked['counterfactual']> }) {
+  return (
+    <div className="cf">
+      <div className="cf-h">What would change Scout&apos;s mind</div>
+      <div className="cf-s">{cf.sentence}</div>
+      {cf.responsible && <div className="cf-r">{cf.responsible}</div>}
+      <div className="cf-note">Computed by re-scoring this listing with one feature changed — not a guess.</div>
+    </div>
+  )
+}
+
+function NearMissRow({ r }: { r: Ranked }) {
+  const [open, setOpen] = useState(false)
+  const l = r.listing
+  const status = r.status === 'match' ? `#${r.rank}` : 'not a match'
+  return (
+    <div className={`nm ${open ? 'open' : ''}`}>
+      <button className="nm-row" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <span className="nm-score">{r.score}%</span>
+        <span className="nm-title">{l.title}</span>
+        <span className="nm-meta">
+          {l.price ? `$${l.price.toLocaleString()}` : ''}{l.transit ? ` · ${l.transit.walkMinutes} min walk · ${l.transit.commuteMinutes} min commute` : ''}
+        </span>
+        <span className={`nm-status ${r.status === 'match' ? '' : 'out'}`}>{status}</span>
+        <span className="nm-caret">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="nm-body">
+          {r.ruleHits.length > 0 && (
+            <div className="nm-hits">
+              {r.ruleHits.map((h) => (
+                <span key={h.ruleId} className={`cause ${h.delta < 0 ? 'neg' : 'pos'}`}>{h.label} {h.delta > 0 ? '+' : ''}{h.delta}</span>
+              ))}
+            </div>
+          )}
+          {r.counterfactual ? <CounterfactualBox cf={r.counterfactual} /> : <div className="meta">No single change moves this one meaningfully.</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Before/after centerpiece ────────────────────────────────────────────────
 
 function useCountTo(from: number, to: number, ms = 1100) {
   const [value, setValue] = useState(from)
-  const started = useRef(false)
   useEffect(() => {
-    if (started.current) return
-    started.current = true
-    const t0 = performance.now()
     let raf = 0
+    let t0 = 0
     const tick = (now: number) => {
+      if (!t0) t0 = now
       const p = Math.min(1, (now - t0) / ms)
       const eased = 1 - Math.pow(1 - p, 3)
       setValue(Math.round(from + (to - from) * eased))
@@ -347,16 +397,30 @@ function useCountTo(from: number, to: number, ms = 1100) {
 }
 
 function DeltaHero({ run, rejectedId, newRules }: { run: RunResult; rejectedId: string | null; newRules: LearnedRule[] }) {
-  const drops = run.movers.filter((m) => m.after < m.before)
-  const rises = run.movers.filter((m) => m.after > m.before)
+  const worse = (m: RunResult['movers'][number]) => m.after < m.before || (m.rankAfter ?? 99) > (m.rankBefore ?? 99)
+  const better = (m: RunResult['movers'][number]) => m.after > m.before && (m.rankAfter ?? 99) <= (m.rankBefore ?? 99)
+  const rankGain = (m: RunResult['movers'][number]) => (m.rankBefore ?? 99) - (m.rankAfter ?? 99)
+  const newTopId = run.matches[0]?.listing.id
+  const topIds = new Set(run.matches.map((r) => r.listing.id))
+
+  const drops = run.movers.filter(worse)
   const dropped =
     drops.find((m) => m.listingId === rejectedId) ??
-    [...drops].sort((a, b) => (a.after - a.before) - (b.after - b.before))[0]
-  const newTopId = run.matches[0]?.listing.id
+    [...drops].sort((a, b) => (a.after - a.before) - (b.after - b.before) || rankGain(a) - rankGain(b))[0]
+  const rises = run.movers.filter(better)
   const rose =
-    rises.find((m) => m.listingId === newTopId) ??
-    [...rises].sort((a, b) => (b.after - b.before) - (a.after - a.before))[0]
+    rises.find((m) => m.listingId === newTopId && m.rankBefore !== 1) ??
+    rises.find((m) => topIds.has(m.listingId) && (m.rankBefore === null || m.rankBefore > run.matches.length)) ??
+    [...rises].sort((a, b) => rankGain(b) - rankGain(a) || (b.after - b.before) - (a.after - a.before))[0]
   if (!dropped && !rose) return null
+
+  // For a listing that fell only in rank: who passed it?
+  const overtakers = dropped
+    ? run.movers.filter((m) =>
+        m.listingId !== dropped.listingId &&
+        (m.rankBefore ?? 99) > (dropped.rankBefore ?? 99) &&
+        (m.rankAfter ?? 99) < (dropped.rankAfter ?? 99))
+    : []
 
   const because = newRules.map((r) => r.reason)
   const fallbackCause = (dropped ?? rose)!.causes[0]?.label
@@ -369,28 +433,55 @@ function DeltaHero({ run, rejectedId, newRules }: { run: RunResult; rejectedId: 
         )}
       </div>
       <div className="hero-tiles">
-        {dropped && <DeltaTile m={dropped} kind="down" note={dropped.statusAfter !== 'match' ? 'dropped out of your matches' : 'ranked lower'} />}
-        {rose && <DeltaTile m={rose} kind="up" note={rose.listingId === newTopId ? 'now your #1 match' : rose.statusBefore !== 'match' ? 'newly surfaced as a match' : 'ranked higher'} />}
+        {dropped && <DeltaTile m={dropped} kind="down" overtakenBy={overtakers.map((m) => m.title)} note={
+          dropped.statusAfter !== 'match' ? 'dropped out of your matches'
+            : topIds.has(dropped.listingId) ? 'ranked lower' : 'pushed out of your top 3'} />}
+        {rose && <DeltaTile m={rose} kind="up" note={
+          rose.listingId === newTopId ? 'now your #1 match'
+            : rose.statusBefore !== 'match' ? 'newly surfaced as a match'
+            : topIds.has(rose.listingId) ? 'moved into your top 3' : 'ranked higher'} />}
       </div>
     </section>
   )
 }
 
-function DeltaTile({ m, kind, note }: { m: RunResult['movers'][number]; kind: 'up' | 'down'; note: string }) {
+function DeltaTile({ m, kind, note, overtakenBy = [] }: { m: RunResult['movers'][number]; kind: 'up' | 'down'; note: string; overtakenBy?: string[] }) {
+  // Show the score when it moved the same way as the story; otherwise the rank is the story
+  const scoreAgrees = kind === 'down' ? m.after < m.before : m.after > m.before
+  const rankStory = !scoreAgrees && m.rankBefore !== m.rankAfter
   const value = useCountTo(m.before, m.after)
   const delta = Math.abs(m.after - m.before)
+  const rank = (r: number | null) => (r === null ? '—' : `#${r}`)
   const top = m.causes.slice(0, 2)
   return (
     <div className={`tile ${kind}`}>
       <div className="tile-title" title={m.title}>{m.title}</div>
-      <div className="tile-score">
-        <span className="from">{m.before}</span>
-        <span className="arrow">→</span>
-        <span className="to">{value}</span>
-        <span className="badge">{kind === 'down' ? '▼' : '▲'}{delta}</span>
+      {rankStory ? (
+        <div className="tile-score">
+          <span className="from">{rank(m.rankBefore)}</span>
+          <span className="arrow">→</span>
+          <span className="to">{rank(m.rankAfter)}</span>
+          <span className="badge">{m.before}→{m.after} pts</span>
+        </div>
+      ) : (
+        <div className="tile-score">
+          <span className="from">{m.before}</span>
+          <span className="arrow">→</span>
+          <span className="to">{value}</span>
+          <span className="badge">{kind === 'down' ? '▼' : '▲'}{delta}</span>
+        </div>
+      )}
+      <div className="tile-note">
+        {note}
+        {!rankStory && m.rankBefore !== m.rankAfter && <span className="tile-rank"> · {rank(m.rankBefore)} → {rank(m.rankAfter)}</span>}
       </div>
-      <div className="tile-note">{note}</div>
-      {top.length > 0 && (
+      {rankStory && overtakenBy.length > 0 ? (
+        <div className="tile-causes">
+          <span className="cause neg">
+            Overtaken by {overtakenBy.slice(0, 2).join(' and ')}{overtakenBy.length > 2 ? ` +${overtakenBy.length - 2} more` : ''}
+          </span>
+        </div>
+      ) : top.length > 0 && (
         <div className="tile-causes">
           {top.map((c, i) => (
             <span key={i} className={`cause ${c.delta < 0 ? 'neg' : 'pos'}`}>{c.label} {c.delta > 0 ? '+' : ''}{c.delta}</span>
@@ -466,9 +557,14 @@ function ListingCard({ r, rank, busy, onTeach }: { r: Ranked; rank: number; busy
           <b>Why Scout chose this</b>
           <ul>
             {r.reasons.map((x, i) => <li key={i}>{x}</li>)}
-            {r.ruleHits.map((h) => <li key={h.ruleId}>Learned rule: {h.label} ({h.delta > 0 ? '+' : ''}{h.delta})</li>)}
+            {r.ruleHits.map((h) => (
+              <li key={h.ruleId} className={h.effect === 'tradeoff' ? 'tradeoff-line' : undefined}>
+                {h.effect === 'tradeoff' ? h.label : `Learned rule: ${h.label}`} ({h.delta > 0 ? '+' : ''}{h.delta})
+              </li>
+            ))}
             {r.concerns.map((x, i) => <li key={`c${i}`} style={{ color: 'var(--down)' }}>{x}</li>)}
           </ul>
+          {r.counterfactual && <CounterfactualBox cf={r.counterfactual} />}
         </div>
       )}
 
@@ -549,7 +645,7 @@ function LearnedView({ memory, onRemove, onReset }: { memory: Memory | null; onR
           {memory.rules.map((r) => (
             <div key={r.id} className="mem">
               <div>
-                <div className="s">{r.reason}</div>
+                <div className="s">{r.kind === 'tradeoff' && <span className="kind-tag">tradeoff</span>}{r.reason}</div>
                 <div><code>{r.description}</code></div>
                 <div className="u">from: “{r.source.utterance}” · applied {r.timesApplied}×</div>
                 {r.memorable && (
