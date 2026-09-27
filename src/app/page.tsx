@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LearnedRule, PreferenceMemory, Preferences, ProviderStatus, Ranked, RunResult, WeightKey } from '@/lib/types'
 import { WEIGHT_KEYS } from '@/lib/types'
 
@@ -9,7 +9,7 @@ type Learned = { reply: string; engine: string; preferences: PreferenceMemory[];
 type StepId = 'interpret' | 'gbrain' | 'memorable' | 'rerank'
 type StepStatus = 'pending' | 'active' | 'done' | 'skipped' | 'error'
 type LearnStep = { id: StepId; status: StepStatus; detail?: string; startedAt?: number; ms?: number }
-type Learning = { utterance: string; steps: LearnStep[]; result: Learned | null; error: string | null }
+type Learning = { utterance: string; listingId: string | null; steps: LearnStep[]; result: Learned | null; error: string | null }
 
 const STEP_LABEL: Record<StepId, { active: string; done: string }> = {
   interpret: { active: 'Claude is interpreting your feedback', done: 'Claude interpreted your feedback' },
@@ -73,6 +73,7 @@ export default function Home() {
 
     setLearning({
       utterance,
+      listingId: listingId ?? null,
       result: null,
       error: null,
       steps: (['interpret', 'gbrain', 'memorable', 'rerank'] as StepId[]).map((id) => ({ id, status: 'pending' })),
@@ -209,6 +210,9 @@ function RunView(props: {
         </div>
       </section>
 
+      {run && traceDone && learning?.result && run.movers.length > 0 && (
+        <DeltaHero key={run.runId} run={run} rejectedId={learning.listingId} newRules={learning.result.rules} />
+      )}
       {learning && <LearningPanel learning={learning} links={props.links} />}
 
       {!run ? (
@@ -319,10 +323,88 @@ function LearningPanel({ learning, links }: { learning: Learning; links: Memory[
   )
 }
 
+// ── Before/after centerpiece ────────────────────────────────────────────────
+
+function useCountTo(from: number, to: number, ms = 1100) {
+  const [value, setValue] = useState(from)
+  const started = useRef(false)
+  useEffect(() => {
+    if (started.current) return
+    started.current = true
+    const t0 = performance.now()
+    let raf = 0
+    const tick = (now: number) => {
+      const p = Math.min(1, (now - t0) / ms)
+      const eased = 1 - Math.pow(1 - p, 3)
+      setValue(Math.round(from + (to - from) * eased))
+      if (p < 1) raf = requestAnimationFrame(tick)
+    }
+    // Brief hold on the "before" number so the change is visible
+    const hold = setTimeout(() => { raf = requestAnimationFrame(tick) }, 450)
+    return () => { clearTimeout(hold); cancelAnimationFrame(raf) }
+  }, [from, to, ms])
+  return value
+}
+
+function DeltaHero({ run, rejectedId, newRules }: { run: RunResult; rejectedId: string | null; newRules: LearnedRule[] }) {
+  const drops = run.movers.filter((m) => m.after < m.before)
+  const rises = run.movers.filter((m) => m.after > m.before)
+  const dropped =
+    drops.find((m) => m.listingId === rejectedId) ??
+    [...drops].sort((a, b) => (a.after - a.before) - (b.after - b.before))[0]
+  const newTopId = run.matches[0]?.listing.id
+  const rose =
+    rises.find((m) => m.listingId === newTopId) ??
+    [...rises].sort((a, b) => (b.after - b.before) - (a.after - a.before))[0]
+  if (!dropped && !rose) return null
+
+  const because = newRules.map((r) => r.reason)
+  const fallbackCause = (dropped ?? rose)!.causes[0]?.label
+  return (
+    <section className="hero-delta">
+      <div className="hero-head">
+        <span className="hero-kicker">Scout learned — and changed its mind</span>
+        {(because.length > 0 || fallbackCause) && (
+          <span className="hero-because">Because: {because.length ? because.join(' · ') : fallbackCause}</span>
+        )}
+      </div>
+      <div className="hero-tiles">
+        {dropped && <DeltaTile m={dropped} kind="down" note={dropped.statusAfter !== 'match' ? 'dropped out of your matches' : 'ranked lower'} />}
+        {rose && <DeltaTile m={rose} kind="up" note={rose.listingId === newTopId ? 'now your #1 match' : rose.statusBefore !== 'match' ? 'newly surfaced as a match' : 'ranked higher'} />}
+      </div>
+    </section>
+  )
+}
+
+function DeltaTile({ m, kind, note }: { m: RunResult['movers'][number]; kind: 'up' | 'down'; note: string }) {
+  const value = useCountTo(m.before, m.after)
+  const delta = Math.abs(m.after - m.before)
+  const top = m.causes.slice(0, 2)
+  return (
+    <div className={`tile ${kind}`}>
+      <div className="tile-title" title={m.title}>{m.title}</div>
+      <div className="tile-score">
+        <span className="from">{m.before}</span>
+        <span className="arrow">→</span>
+        <span className="to">{value}</span>
+        <span className="badge">{kind === 'down' ? '▼' : '▲'}{delta}</span>
+      </div>
+      <div className="tile-note">{note}</div>
+      {top.length > 0 && (
+        <div className="tile-causes">
+          {top.map((c, i) => (
+            <span key={i} className={`cause ${c.delta < 0 ? 'neg' : 'pos'}`}>{c.label} {c.delta > 0 ? '+' : ''}{c.delta}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Movers({ run }: { run: RunResult }) {
   return (
     <div className="panel movers">
-      <p className="h">What changed because Scout learned</p>
+      <p className="h">All ranking changes</p>
       {run.movers.map((m) => {
         const up = m.after > m.before
         const fell = m.statusBefore === 'match' && m.statusAfter !== 'match'
