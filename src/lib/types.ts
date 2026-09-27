@@ -65,6 +65,7 @@ export interface PreferenceMemory {
   source: 'onboarding' | 'correction'
   utterance: string | null
   createdAt: string
+  gbrainFactId?: string | null
 }
 
 // ── Learned rules (Memorable) ───────────────────────────────────────────────
@@ -103,6 +104,7 @@ export interface LearnedRule {
   source: { kind: 'correction'; utterance: string; listingId: string | null }
   createdAt: string
   timesApplied: number
+  memorable?: { requestId: string | null; title: string; steps: { seq: number; action: string; activity_class?: string }[] } | null
 }
 
 // ── Ranking ─────────────────────────────────────────────────────────────────

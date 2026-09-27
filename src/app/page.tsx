@@ -331,6 +331,7 @@ function LearnedView({ memory, onRemove, onReset }: { memory: Memory | null; onR
               <div>
                 <div className="s">{p.statement}</div>
                 {p.utterance && <div className="u">from: “{p.utterance}”</div>}
+                {p.gbrainFactId && <div className="u" style={{ color: 'var(--brain)' }}>synced to GBrain · fact #{p.gbrainFactId}</div>}
               </div>
               <button className="btn small danger" onClick={() => onRemove('preference', p.id)}>Forget</button>
             </div>
@@ -346,6 +347,11 @@ function LearnedView({ memory, onRemove, onReset }: { memory: Memory | null; onR
                 <div className="s">{r.reason}</div>
                 <div><code>{r.description}</code></div>
                 <div className="u">from: “{r.source.utterance}” · applied {r.timesApplied}×</div>
+                {r.memorable && (
+                  <div className="u" style={{ color: 'var(--brain)' }}>
+                    Memorable procedure: {r.memorable.steps.map((s) => s.action).join(' → ')}
+                  </div>
+                )}
               </div>
               <button className="btn small danger" onClick={() => onRemove('rule', r.id)}>Remove</button>
             </div>

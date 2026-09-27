@@ -4,6 +4,7 @@
 
 import { DEMO_PROFILE, seedListings } from './data/seed'
 import { fetchSupabaseListings, supabaseConfigured } from './data/supabase'
+import { gbrainRecallCount, gbrainToken } from './memory/gbrain'
 import { newId, updateState, type RunSnapshot } from './memory/local-store'
 import { preferenceStore, providerStatuses, ruleStore } from './memory/providers'
 import { applyPreferenceMemories, dedupeKey, describeRule, rankListing } from './ranker'
@@ -19,7 +20,12 @@ export async function loadListings(source: 'seed' | 'supabase'): Promise<Listing
 
 export async function runScout(requested: 'seed' | 'supabase' = 'seed'): Promise<RunResult> {
   const source = requested === 'supabase' && supabaseConfigured() ? 'supabase' : 'seed'
-  const [listings, memories, rules] = await Promise.all([loadListings(source), preferenceStore.list(), ruleStore.list()])
+  const [listings, memories, rules, gbrainFacts] = await Promise.all([
+    loadListings(source),
+    preferenceStore.list(),
+    ruleStore.list(),
+    gbrainToken() ? gbrainRecallCount().catch(() => null) : Promise.resolve(null),
+  ])
   const prefs = applyPreferenceMemories(DEMO_PROFILE, memories)
 
   // Dedupe first so cross-posts don't crowd the results
@@ -42,8 +48,14 @@ export async function runScout(requested: 'seed' | 'supabase' = 'seed'): Promise
 
   const trace: TraceStep[] = [
     { label: `Loaded ${listings.length} listings`, detail: source === 'seed' ? 'demo inventory' : 'Scout Supabase (read-only)' },
-    { label: `Recalled ${memories.length} preference${memories.length === 1 ? '' : 's'}`, detail: memories.map((m) => m.statement).join(' · ') || 'onboarding profile only' },
-    { label: `Applied ${rulesUsed.size} learned rule${rulesUsed.size === 1 ? '' : 's'}`, detail: rules.filter((r) => rulesUsed.has(r.id)).map((r) => describeRule(r)).join(' · ') || undefined },
+    {
+      label: `Recalled ${memories.length} preference${memories.length === 1 ? '' : 's'}${gbrainFacts !== null ? ' from GBrain' : ''}`,
+      detail: [memories.map((m) => m.statement).join(' · ') || 'onboarding profile only', gbrainFacts !== null ? `${gbrainFacts} facts on file in GBrain` : null].filter(Boolean).join(' — '),
+    },
+    {
+      label: `Applied ${rulesUsed.size} learned rule${rulesUsed.size === 1 ? '' : 's'}${rules.some((r) => r.memorable) ? ' (Memorable procedures)' : ''}`,
+      detail: rules.filter((r) => rulesUsed.has(r.id)).map((r) => describeRule(r)).join(' · ') || undefined,
+    },
     { label: `Removed ${duplicates} duplicate${duplicates === 1 ? '' : 's'}`, detail: 'cross-posted across sources' },
     { label: `Rejected ${rejected.length}`, detail: rejectedByRules ? `${rejectedByRules} because of learned rules` : undefined },
     { label: `Flagged ${flagged.length} questionable`, detail: 'low legitimacy signals' },
