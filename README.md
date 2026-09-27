@@ -57,26 +57,61 @@ User preference / correction
    ```
    Click a match → *Why Scout chose this*: $2,485 ✓ · 4 min to BART ✓ · 41 min commute ✓ · learned neighborhood ✓ — **96% match**
 
+## Run it
+
+```bash
+npm install
+cp .env.example .env.local   # ANTHROPIC_API_KEY, SUPABASE_URL + key (read-only use)
+npm run dev                  # http://localhost:3002
+```
+
+Everything degrades gracefully: no Anthropic key → offline keyword parser; no
+Supabase → deterministic demo inventory; no GBrain/Memorable keys → local
+memory. Provider status pills in the header show which mode each layer is in.
+
+## The loop
+
+1. **Run Scout** → deterministic ranker scores inventory with the renter's weights + learned rules.
+2. **Correct Scout** ("Not for me" on a card, or the Teach box) in plain English.
+3. **Claude** converts it into a constrained schema:
+   - durable preference / weight change → **GBrain**
+   - learned rule `{ field, operator, value, effect, magnitude, reason, source }` → **Memorable**
+4. **Re-run** → "What changed because Scout learned" shows each score delta and the rule/weight that caused it.
+5. **What Scout has learned** tab → every preference and rule is visible and removable.
+
+Claude never ranks listings directly; it only edits the weights and rules the ranker consumes.
+
+## Scripted demo (seed inventory)
+
+| Step | Action | Result |
+|---|---|---|
+| 1 | Run Scout | #1 is the Bernal 1BR, 86% (big and cheap, but 18 min walk to BART) |
+| 2 | "Not for me" on it → *"Too far from BART. Anything over 10 minutes walking from rapid transit should rank much lower."* | Learns rule `walk to transit > 10 → −25` + transit weight ↑ / space weight ↓ |
+| 3 | (auto re-run) | Bernal 86 → 52, drops out · Mission studio 75 → 86, becomes #1 · trace shows the applied rule |
+| 4 | What Scout has learned → Remove the rule → Run | Bernal climbs back; the user stays in control |
+
+`npx tsx scripts/simulate.ts` prints the before/after rankings without the UI.
+
 ## Layout
 
 ```
-src/
-  agent/        # Scout agent loop + tool definitions
-  memory/       # GBrain MCP client (read/write preferences)
-  apprentice/   # Memorable integration (corrections → procedures)
-  ingest/       # Apify / existing listing ingestion adapters
-scripts/        # seed data, demo runners
-docs/           # architecture notes, pitch
+src/lib/
+  ranker.ts          # deterministic ranker (ported from Scout v1) + learned-rule engine
+  run.ts             # one autopilot run: load → recall → apply → dedupe/reject/flag → deltas
+  transit.ts         # estimated walk-to-BART/Muni + commute by neighborhood
+  agent/interpret.ts # Claude: NL correction → structured prefs + rules (+ offline fallback)
+  memory/            # PreferenceStore (GBrain) / RuleStore (Memorable) over local JSON
+  data/seed.ts       # deterministic demo inventory tuned for the correction flip
+  data/supabase.ts   # read-only view of Scout's listings table
+src/app/             # Next.js UI + /api/{run,feedback,memory,reset}
 ```
 
-## Setup
-
-```bash
-cp .env.example .env   # fill in keys
-```
+Hackathon state lives in `.data/state.json` — never in Scout's production tables.
 
 ## Timeline (hacking 1:15 PM → 5:00 PM)
 
+- [x] Correction loop end-to-end (ranker, rules, deltas, trace, learned view)
+- [ ] Top up Anthropic credits so Claude (not the fallback parser) interprets corrections
 - [ ] 1:15–2:00 — Wire Claude agent to existing Apify + Supabase
 - [ ] 2:00–2:45 — GBrain preference read/write
 - [ ] 2:45–3:45 — Memorable correction loop

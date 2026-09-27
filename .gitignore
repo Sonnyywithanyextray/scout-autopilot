@@ -7,3 +7,7 @@ dist/
 *.log
 __pycache__/
 .venv/
+.data/
+next-env.d.ts
+*.tsbuildinfo
+.next-dev.log
