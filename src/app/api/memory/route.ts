@@ -12,6 +12,10 @@ export async function GET() {
     preferences,
     rules: rules.map((r) => ({ ...r, description: describeRule(r) })),
     providers: providerStatuses(),
+    links: {
+      gbrain: process.env.GBRAIN_DASHBOARD_URL || 'https://gbrain.io/memory',
+      memorable: process.env.MEMORABLE_DASHBOARD_URL || 'https://www.memorable.sh/dash',
+    },
   })
 }
 

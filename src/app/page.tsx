@@ -23,6 +23,7 @@ type Memory = {
   preferences: PreferenceMemory[]
   rules: (LearnedRule & { description: string })[]
   providers: ProviderStatus[]
+  links: { gbrain: string; memorable: string }
 }
 
 export default function Home() {
@@ -163,7 +164,7 @@ export default function Home() {
       {tab === 'run' ? (
         <RunView
           run={run} visibleSteps={visibleSteps} running={running} teaching={teaching} learning={learning}
-          source={source} setSource={setSource} onRun={runScout} onTeach={teach}
+          source={source} setSource={setSource} onRun={runScout} onTeach={teach} links={memory?.links ?? null}
         />
       ) : (
         <LearnedView memory={memory} onRemove={remove} onReset={reset} />
@@ -177,6 +178,7 @@ export default function Home() {
 function RunView(props: {
   run: RunResult | null; visibleSteps: number; running: boolean; teaching: boolean; learning: Learning | null
   source: Source; setSource: (s: Source) => void; onRun: () => void; onTeach: (u: string, id?: string) => void
+  links: Memory['links'] | null
 }) {
   const { run, visibleSteps, running, teaching, learning } = props
   const [draft, setDraft] = useState('')
@@ -207,7 +209,7 @@ function RunView(props: {
         </div>
       </section>
 
-      {learning && <LearningPanel learning={learning} />}
+      {learning && <LearningPanel learning={learning} links={props.links} />}
 
       {!run ? (
         <div className="empty" style={{ marginTop: 16 }}>Hit <b>Run Scout</b> to have Scout work through today&apos;s listings.</div>
@@ -270,7 +272,7 @@ function summarizeMovers(run: RunResult): string {
     .join(' · ')
 }
 
-function LearningPanel({ learning }: { learning: Learning }) {
+function LearningPanel({ learning, links }: { learning: Learning; links: Memory['links'] | null }) {
   const { result, steps, error } = learning
   const nothing = result && !result.preferences.length && !result.rules.length
   return (
@@ -289,6 +291,8 @@ function LearningPanel({ learning }: { learning: Learning }) {
                 {text}{st.status === 'active' ? '…' : ''}
                 {st.detail && <small>{st.detail}</small>}
               </span>
+              {st.status === 'done' && links && st.id === 'gbrain' && <ExtLink href={links.gbrain}>GBrain</ExtLink>}
+              {st.status === 'done' && links && st.id === 'memorable' && <ExtLink href={links.memorable}>Memorable</ExtLink>}
               {st.ms !== undefined && st.status !== 'pending' && <span className="ms">{(st.ms / 1000).toFixed(1)}s</span>}
             </li>
           )
@@ -409,6 +413,14 @@ function ListingCard({ r, rank, busy, onTeach }: { r: Ranked; rank: number; busy
   )
 }
 
+function ExtLink({ href, children }: { href: string; children: React.ReactNode }) {
+  return (
+    <a className="extlink" href={href} target="_blank" rel="noreferrer">
+      {children} ↗
+    </a>
+  )
+}
+
 // ── Learned view ────────────────────────────────────────────────────────────
 
 const WEIGHT_LABEL: Record<WeightKey, string> = {
@@ -424,14 +436,22 @@ function LearnedView({ memory, onRemove, onReset }: { memory: Memory | null; onR
     <>
       <div className="mem-grid">
         <section className="panel">
-          <p className="h">Preferences · stored in GBrain</p>
+          <div className="h-row">
+            <p className="h">Preferences · stored in GBrain</p>
+            <ExtLink href={memory.links.gbrain}>Open in GBrain</ExtLink>
+          </div>
           {memory.preferences.length === 0 && <div className="meta">Nothing yet — correct Scout and it will remember.</div>}
           {memory.preferences.map((p) => (
             <div key={p.id} className="mem">
               <div>
                 <div className="s">{p.statement}</div>
                 {p.utterance && <div className="u">from: “{p.utterance}”</div>}
-                {p.gbrainFactId && <div className="u" style={{ color: 'var(--brain)' }}>synced to GBrain · fact #{p.gbrainFactId}</div>}
+                {p.gbrainFactId && (
+                  <div className="u" style={{ color: 'var(--brain)' }}>
+                    synced to GBrain · fact #{p.gbrainFactId} · see “Scout housing search” under Projects ·{' '}
+                    <a href={memory.links.gbrain} target="_blank" rel="noreferrer">view ↗</a>
+                  </div>
+                )}
               </div>
               <button className="btn small danger" onClick={() => onRemove('preference', p.id)}>Forget</button>
             </div>
@@ -439,7 +459,10 @@ function LearnedView({ memory, onRemove, onReset }: { memory: Memory | null; onR
         </section>
 
         <section className="panel">
-          <p className="h">Learned rules · stored in Memorable</p>
+          <div className="h-row">
+            <p className="h">Learned rules · stored in Memorable</p>
+            <ExtLink href={memory.links.memorable}>Open Memorable</ExtLink>
+          </div>
           {memory.rules.length === 0 && <div className="meta">No learned rules yet.</div>}
           {memory.rules.map((r) => (
             <div key={r.id} className="mem">
@@ -449,7 +472,8 @@ function LearnedView({ memory, onRemove, onReset }: { memory: Memory | null; onR
                 <div className="u">from: “{r.source.utterance}” · applied {r.timesApplied}×</div>
                 {r.memorable && (
                   <div className="u" style={{ color: 'var(--brain)' }}>
-                    Memorable procedure: {r.memorable.steps.map((s) => s.action).join(' → ')}
+                    Memorable procedure: {r.memorable.steps.map((s) => s.action).join(' → ')} ·{' '}
+                    <a href={memory.links.memorable} target="_blank" rel="noreferrer">view ↗</a>
                   </div>
                 )}
               </div>
