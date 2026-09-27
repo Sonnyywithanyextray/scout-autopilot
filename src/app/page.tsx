@@ -6,6 +6,17 @@ import { WEIGHT_KEYS } from '@/lib/types'
 
 type Source = 'seed' | 'supabase'
 type Learned = { reply: string; engine: string; preferences: PreferenceMemory[]; rules: LearnedRule[] }
+type StepId = 'interpret' | 'gbrain' | 'memorable' | 'rerank'
+type StepStatus = 'pending' | 'active' | 'done' | 'skipped' | 'error'
+type LearnStep = { id: StepId; status: StepStatus; detail?: string; startedAt?: number; ms?: number }
+type Learning = { utterance: string; steps: LearnStep[]; result: Learned | null; error: string | null }
+
+const STEP_LABEL: Record<StepId, { active: string; done: string }> = {
+  interpret: { active: 'Claude is interpreting your feedback', done: 'Claude interpreted your feedback' },
+  gbrain: { active: 'Saving preferences to GBrain', done: 'Saved to GBrain' },
+  memorable: { active: 'Capturing the procedure in Memorable', done: 'Procedure captured in Memorable' },
+  rerank: { active: 'Re-ranking listings with what Scout learned', done: 'Re-ranked listings' },
+}
 type Memory = {
   profile: Preferences
   effective: Preferences
@@ -20,7 +31,7 @@ export default function Home() {
   const [run, setRun] = useState<RunResult | null>(null)
   const [visibleSteps, setVisibleSteps] = useState(0)
   const [running, setRunning] = useState(false)
-  const [learned, setLearned] = useState<Learned | null>(null)
+  const [learning, setLearning] = useState<Learning | null>(null)
   const [teaching, setTeaching] = useState(false)
   const [memory, setMemory] = useState<Memory | null>(null)
 
@@ -30,7 +41,7 @@ export default function Home() {
 
   useEffect(() => { loadMemory() }, [loadMemory])
 
-  const runScout = useCallback(async () => {
+  const runScout = useCallback(async (): Promise<RunResult> => {
     setRunning(true)
     setVisibleSteps(0)
     try {
@@ -40,6 +51,7 @@ export default function Home() {
         await new Promise((r) => setTimeout(r, 220))
         setVisibleSteps(i)
       }
+      return res
     } finally {
       setRunning(false)
     }
@@ -47,12 +59,65 @@ export default function Home() {
 
   const teach = useCallback(async (utterance: string, listingId?: string) => {
     setTeaching(true)
+    const update = (id: StepId, status: StepStatus, detail?: string) =>
+      setLearning((l) => l && {
+        ...l,
+        steps: l.steps.map((st) => {
+          if (st.id !== id) return st
+          const now = Date.now()
+          if (status === 'active') return { ...st, status, detail, startedAt: now }
+          return { ...st, status, detail, ms: st.startedAt ? now - st.startedAt : undefined }
+        }),
+      })
+
+    setLearning({
+      utterance,
+      result: null,
+      error: null,
+      steps: (['interpret', 'gbrain', 'memorable', 'rerank'] as StepId[]).map((id) => ({ id, status: 'pending' })),
+    })
+
     try {
-      const res = await (await fetch('/api/feedback', { method: 'POST', body: JSON.stringify({ utterance, listingId, source }) })).json()
-      if (res.error) throw new Error(res.error)
-      setLearned(res)
+      const res = await fetch('/api/feedback', { method: 'POST', body: JSON.stringify({ utterance, listingId, source }) })
+      if (!res.ok || !res.body) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.error ?? `Request failed (${res.status})`)
+      }
+
+      // Read the NDJSON progress stream
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let result: Learned | null = null
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.trim()) continue
+          const ev = JSON.parse(line)
+          if (ev.type === 'step') update(ev.id, ev.status, ev.detail)
+          else if (ev.type === 'result') {
+            result = ev
+            setLearning((l) => l && { ...l, result: ev })
+          } else if (ev.type === 'error') throw new Error(ev.message)
+        }
+      }
+      if (!result) throw new Error('Learning ended without a result')
+
       await loadMemory()
-      await runScout()
+      update('rerank', 'active')
+      const next = await runScout()
+      update('rerank', 'done', summarizeMovers(next))
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Learning failed'
+      setLearning((l) => l && {
+        ...l,
+        error: message,
+        steps: l.steps.map((st) => (st.status === 'active' ? { ...st, status: 'error' } : st)),
+      })
     } finally {
       setTeaching(false)
     }
@@ -66,7 +131,7 @@ export default function Home() {
   const reset = async () => {
     await fetch('/api/reset', { method: 'POST' })
     setRun(null)
-    setLearned(null)
+    setLearning(null)
     await loadMemory()
   }
 
@@ -97,7 +162,7 @@ export default function Home() {
 
       {tab === 'run' ? (
         <RunView
-          run={run} visibleSteps={visibleSteps} running={running} teaching={teaching} learned={learned}
+          run={run} visibleSteps={visibleSteps} running={running} teaching={teaching} learning={learning}
           source={source} setSource={setSource} onRun={runScout} onTeach={teach}
         />
       ) : (
@@ -110,10 +175,10 @@ export default function Home() {
 // ── Run view ────────────────────────────────────────────────────────────────
 
 function RunView(props: {
-  run: RunResult | null; visibleSteps: number; running: boolean; teaching: boolean; learned: Learned | null
+  run: RunResult | null; visibleSteps: number; running: boolean; teaching: boolean; learning: Learning | null
   source: Source; setSource: (s: Source) => void; onRun: () => void; onTeach: (u: string, id?: string) => void
 }) {
-  const { run, visibleSteps, running, teaching, learned } = props
+  const { run, visibleSteps, running, teaching, learning } = props
   const [draft, setDraft] = useState('')
   const busy = running || teaching
   const traceDone = run && visibleSteps >= run.trace.length
@@ -142,7 +207,7 @@ function RunView(props: {
         </div>
       </section>
 
-      {learned && <LearnedToast learned={learned} />}
+      {learning && <LearningPanel learning={learning} />}
 
       {!run ? (
         <div className="empty" style={{ marginTop: 16 }}>Hit <b>Run Scout</b> to have Scout work through today&apos;s listings.</div>
@@ -195,22 +260,57 @@ function RunView(props: {
   )
 }
 
-function LearnedToast({ learned }: { learned: Learned }) {
-  const nothing = !learned.preferences.length && !learned.rules.length
+function summarizeMovers(run: RunResult): string {
+  if (!run.movers.length) return 'no ranking changes'
+  const fell = run.movers.filter((m) => m.after < m.before).sort((a, b) => (a.after - a.before) - (b.after - b.before))[0]
+  const rose = run.movers.filter((m) => m.after > m.before).sort((a, b) => (b.after - b.before) - (a.after - a.before))[0]
+  const short = (t: string) => (t.length > 28 ? `${t.slice(0, 26)}…` : t)
+  return [fell && `${short(fell.title)} ${fell.before} → ${fell.after}`, rose && `${short(rose.title)} ${rose.before} → ${rose.after}`]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+function LearningPanel({ learning }: { learning: Learning }) {
+  const { result, steps, error } = learning
+  const nothing = result && !result.preferences.length && !result.rules.length
   return (
     <div className="learned">
-      <div className="reply">🧠 {learned.reply}</div>
-      {!nothing && (
-        <div>
-          {learned.preferences.map((p) => (
-            <span key={p.id} className="chip"><span className="tag">GBrain · preference</span>{p.statement}</span>
-          ))}
-          {learned.rules.map((r) => (
-            <span key={r.id} className="chip"><span className="tag">Memorable · rule</span>{r.reason}</span>
-          ))}
+      <div className="said">You told Scout: “{learning.utterance}”</div>
+      <ol className="steps">
+        {steps.map((st) => {
+          const label = STEP_LABEL[st.id]
+          const text = st.status === 'done' ? label.done : label.active
+          return (
+            <li key={st.id} className={`step ${st.status}`}>
+              <span className="icon">
+                {st.status === 'active' ? <span className="spin" /> : st.status === 'done' ? '✓' : st.status === 'skipped' ? '–' : st.status === 'error' ? '!' : ''}
+              </span>
+              <span className="grow">
+                {text}{st.status === 'active' ? '…' : ''}
+                {st.detail && <small>{st.detail}</small>}
+              </span>
+              {st.ms !== undefined && st.status !== 'pending' && <span className="ms">{(st.ms / 1000).toFixed(1)}s</span>}
+            </li>
+          )
+        })}
+      </ol>
+
+      {result && (
+        <div className="outcome">
+          <div className="reply">🧠 {result.reply}</div>
+          {!nothing && (
+            <div>
+              {result.preferences.map((p) => (
+                <span key={p.id} className="chip"><span className="tag">GBrain · preference</span>{p.statement}</span>
+              ))}
+              {result.rules.map((r) => (
+                <span key={r.id} className="chip"><span className="tag">Memorable · rule</span>{r.reason}</span>
+              ))}
+            </div>
+          )}
         </div>
       )}
-      {learned.engine === 'fallback' && <div className="status-note">interpreted with the offline keyword parser</div>}
+      {error && <div className="status-note" style={{ color: 'var(--down)' }}>Something went wrong: {error}</div>}
     </div>
   )
 }

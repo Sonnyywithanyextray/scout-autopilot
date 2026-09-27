@@ -84,14 +84,29 @@ async function safeMirror<T>(label: string, fn: () => Promise<T>): Promise<T | n
   }
 }
 
+// Step-wise sponsor writes, used directly by the feedback route so the UI can
+// show each one as it completes. Each returns null when skipped or failed.
+export async function pushPreferenceToGbrain(m: PreferenceMemory): Promise<string | null> {
+  if (!gbrainMirror.enabled) return null
+  const factId = await safeMirror(gbrainMirror.name, () => gbrainMirror.add(m))
+  if (factId) await updateState((s) => { const p = s.preferences.find((x) => x.id === m.id); if (p) p.gbrainFactId = factId })
+  return factId
+}
+
+export async function pushRuleToMemorable(r: LearnedRule): Promise<NonNullable<LearnedRule['memorable']> | null> {
+  if (!memorableMirror.enabled) return null
+  const draft = await safeMirror(memorableMirror.name, () => memorableMirror.add(r))
+  if (draft) await updateState((s) => { const x = s.rules.find((y) => y.id === r.id); if (x) x.memorable = draft })
+  return draft
+}
+
 function withPrefMirror(base: PreferenceStore, mirror: Mirror<PreferenceMemory, string>): PreferenceStore {
   if (!mirror.enabled) return base
   return {
     ...base,
     async add(m) {
       await base.add(m)
-      const factId = await safeMirror(mirror.name, () => mirror.add(m))
-      if (factId) await updateState((s) => { const p = s.preferences.find((x) => x.id === m.id); if (p) p.gbrainFactId = factId })
+      await pushPreferenceToGbrain(m)
       await syncGbrainPage()
     },
     async remove(id) {
@@ -109,8 +124,7 @@ function withRuleMirror(base: RuleStore, mirror: Mirror<LearnedRule, NonNullable
     ...base,
     async add(r) {
       await base.add(r)
-      const draft = await safeMirror(mirror.name, () => mirror.add(r))
-      if (draft) await updateState((s) => { const x = s.rules.find((y) => y.id === r.id); if (x) x.memorable = draft })
+      await pushRuleToMemorable(r)
       await syncGbrainPage()
     },
     async remove(id) {
@@ -123,19 +137,28 @@ function withRuleMirror(base: RuleStore, mirror: Mirror<LearnedRule, NonNullable
 }
 
 // Rewrites the "Scout housing search" page in GBrain from local state.
-export async function syncGbrainPage(): Promise<void> {
-  if (!gbrainMirror.enabled) return
+export async function syncGbrainPage(): Promise<boolean> {
+  if (!gbrainMirror.enabled) return false
   const { preferences, rules } = await readState()
-  await safeMirror('GBrain page', () =>
+  const ok = await safeMirror('GBrain page', async () => {
+    await
     gbrainWriteSummaryPage({
       preferences: preferences.map((p) => ({ statement: p.statement, utterance: p.utterance, createdAt: p.createdAt })),
       rules: rules.map((r) => ({ reason: r.reason, description: describeRule(r), utterance: r.source.utterance, memorableSteps: r.memorable?.steps.length ?? null })),
-    }),
-  )
+    })
+    return true
+  })
+  return ok === true
 }
 
 export const preferenceStore = withPrefMirror(localPreferences, gbrainMirror)
 export const ruleStore = withRuleMirror(localRules, memorableMirror)
+// Local-only writes, for callers that push to sponsors step by step
+export const localPreferenceStore = localPreferences
+export const localRuleStore = localRules
+
+export const isGbrainLive = () => gbrainMirror.enabled
+export const isMemorableLive = () => memorableMirror.enabled
 
 export function providerStatuses(): ProviderStatus[] {
   return [
